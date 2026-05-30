@@ -8,7 +8,9 @@ import cv2
 import numpy as np
 import queue
 import threading
+import time
 import requests as req
+from collections import Counter
 
 # ─── KHỞI TẠO APP ────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -23,6 +25,11 @@ os.makedirs(DETECTION_FOLDER, exist_ok=True)
 
 model   = YOLO("best.pt")
 history = []
+
+# Cooldown per camera: tránh spam thông báo (giây)
+ALERT_COOLDOWN    = 30
+camera_last_alert = {}   # { camera_id: timestamp }
+camera_lock       = threading.Lock()
 
 # ─── TELEGRAM CONFIG ──────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -107,6 +114,43 @@ def build_detection_entry(species: str, confidence: float, count: int) -> dict:
         "actionTaken": meta["actionTaken"],
     }
 
+def create_and_dispatch_event(detections: list, frame, cam_id: str, cam_name: str, location: str):
+    """Tạo event, lưu ảnh, đẩy vào SSE queue và gửi Telegram."""
+    if not detections:
+        return
+
+    severity_order   = {"critical": 0, "warning": 1, "info": 2}
+    overall_severity = min(
+        [d["severity"] for d in detections],
+        key=lambda s: severity_order.get(s, 99),
+    )
+    dominant = Counter(d["species"] for d in detections).most_common(1)[0][0]
+
+    # Lưu ảnh frame
+    filename   = f"{uuid.uuid4()}.jpg"
+    image_path = os.path.join(UPLOAD_FOLDER, filename)
+    cv2.imwrite(image_path, frame)
+
+    event = {
+        "id":              str(uuid.uuid4()),
+        "timestamp":       datetime.now().isoformat(),
+        "source":          "stream",
+        "filename":        filename,
+        "count":           len(detections),
+        "overallSeverity": overall_severity,
+        "dominantSpecies": dominant,
+        "detections":      detections,
+        "cameraId":        cam_id,
+        "cameraName":      cam_name,
+        "location":        location,
+        "thumbnail":       f"/uploads/{filename}",
+    }
+
+    history.append(event)
+    detection_queue.put(event)
+    threading.Thread(target=send_telegram, args=(event,), daemon=True).start()
+    print(f"🔔 [{cam_id}] Phát hiện {len(detections)} ong – {dominant}")
+
 # ─── SSE ENDPOINT ─────────────────────────────────────────────────────────────
 @app.route("/events")
 def stream_events():
@@ -126,27 +170,57 @@ def stream_events():
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
-# ─── VIDEO STREAMING (MJPEG) ──────────────────────────────────────────────────
+# ─── VIDEO STREAMING (MJPEG) + PHÁT HIỆN THÔNG BÁO ──────────────────────────
 @app.route("/stream/<video_name>")
 def stream_video(video_name):
+    # Lấy thông tin camera từ query params (frontend truyền lên)
+    cam_id   = request.args.get("camId",   video_name)
+    cam_name = request.args.get("camName", video_name)
+    location = request.args.get("location", "Live Camera")
+
     def generate_frames():
         video_path = os.path.join(UPLOAD_FOLDER, video_name)
         if not os.path.exists(video_path):
             print(f"Error: Video file {video_path} not found.")
             return
+
         cap = cv2.VideoCapture(video_path)
         while cap.isOpened():
             success, frame = cap.read()
             if not success:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 continue
-            results        = model(frame, conf=0.4, verbose=False)
+
+            results         = model(frame, conf=0.4, verbose=False)
             annotated_frame = results[0].plot()
-            ret, buffer    = cv2.imencode(".jpg", annotated_frame)
+
+            # ── PHÁT HIỆN ONG → TẠO THÔNG BÁO (có cooldown) ──────────────
+            boxes = results[0].boxes
+            if boxes and len(boxes) > 0:
+                with camera_lock:
+                    last_alert = camera_last_alert.get(cam_id, 0)
+                    now        = time.time()
+                    if now - last_alert > ALERT_COOLDOWN:
+                        camera_last_alert[cam_id] = now
+                        detections = []
+                        for box in boxes:
+                            cls_id     = int(box.cls[0])
+                            species    = model.names[cls_id]
+                            confidence = float(box.conf[0])
+                            detections.append(build_detection_entry(species, confidence, len(boxes)))
+                        # Chạy trong thread riêng để không block stream
+                        threading.Thread(
+                            target=create_and_dispatch_event,
+                            args=(detections, frame.copy(), cam_id, cam_name, location),
+                            daemon=True,
+                        ).start()
+
+            ret, buffer = cv2.imencode(".jpg", annotated_frame)
             if not ret:
                 continue
             yield (b"--frame\r\n"
                    b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n")
+
     return Response(generate_frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
@@ -170,8 +244,8 @@ def detect():
     for r in results:
         total = len(r.boxes)
         for box in r.boxes:
-            cls_id    = int(box.cls[0])
-            species   = model.names[cls_id]
+            cls_id     = int(box.cls[0])
+            species    = model.names[cls_id]
             confidence = float(box.conf[0])
             detections.append(build_detection_entry(species, confidence, total))
 
@@ -185,7 +259,6 @@ def detect():
 
     dominant = None
     if detections:
-        from collections import Counter
         dominant = Counter(d["species"] for d in detections).most_common(1)[0][0]
 
     event = {
@@ -204,8 +277,8 @@ def detect():
     }
 
     history.append(event)
-    detection_queue.put(event)   # SSE realtime
-    threading.Thread(target=send_telegram, args=(event,), daemon=True).start()  # Telegram (non-blocking)
+    detection_queue.put(event)
+    threading.Thread(target=send_telegram, args=(event,), daemon=True).start()
     return jsonify(event)
 
 @app.route("/history", methods=["GET"])
@@ -226,4 +299,4 @@ def clear_history():
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
- app.run(debug=False, port=5000, threaded=True)
+    app.run(debug=False, port=5000, threaded=True)

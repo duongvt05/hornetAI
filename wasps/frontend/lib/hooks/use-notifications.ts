@@ -33,7 +33,7 @@ export function useNotifications() {
             location: event.location,
             species: event.dominantSpecies,
             confidence: event.detections?.[0]?.confidence,
-            link: `/dashboard/detection-history`,
+            link: `/dashboard/notifications`,
             imageUrl: event.thumbnail ? `${BACKEND_URL}${event.thumbnail}` : undefined,
           };
 
