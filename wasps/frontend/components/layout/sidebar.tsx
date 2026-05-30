@@ -1,0 +1,225 @@
+"use client"
+
+import { usePathname } from 'next/navigation';
+import Link from 'next/link';
+import { cn } from '@/lib/utils';
+import { buttonVariants } from '@/components/ui/button';
+import {
+  LayoutDashboard,
+  Camera,
+  Settings,
+  ChevronDown,
+  BrainCircuit,
+  Bell,
+  History,
+  ScanSearch,
+} from 'lucide-react';
+import { useAuth } from '@/components/providers/auth-provider';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { useState } from 'react';
+import { motion } from 'framer-motion';
+
+interface SidebarItem {
+  title: string;
+  href: string;
+  icon: React.ReactNode;
+  submenu?: SidebarItem[];
+}
+
+export default function Sidebar() {
+  const pathname = usePathname();
+  const { user } = useAuth();
+
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
+    cameras: true,
+  });
+
+  const toggleGroup = (group: string) => {
+    setOpenGroups({ ...openGroups, [group]: !openGroups[group] });
+  };
+
+  const sidebarItems: SidebarItem[] = [
+    {
+      title: 'Dashboard',
+      href: '/dashboard',
+      icon: <LayoutDashboard className="w-5 h-5" />,
+    },
+    {
+      title: 'Alerts',                       // đổi Notifications → Alerts
+      href: '/dashboard/notifications',
+      icon: <Bell className="w-5 h-5" />,
+    },
+    {
+      title: 'Cameras',
+      href: '/dashboard/cameras',
+      icon: <Camera className="w-5 h-5" />,
+      submenu: [
+        {
+          title: 'Live Detection',            // đổi Live View → Live Detection
+          href: '/dashboard/cameras/live',
+          icon: <ScanSearch className="w-4 h-4" />,
+        },
+      ],
+    },
+    {
+      title: 'Detection History',
+      href: '/dashboard/detection-history',
+      icon: <History className="w-5 h-5" />,
+    },
+    {
+      title: 'AI Assistant',
+      href: '/dashboard/ai-assistant',
+      icon: <BrainCircuit className="w-5 h-5" />,
+    },
+    {
+      title: 'Settings',
+      href: '/dashboard/settings',
+      icon: <Settings className="w-5 h-5" />,
+    },
+  ];
+
+  const adminItems: SidebarItem[] = [];
+
+  const sidebarVariants = {
+    hidden: { opacity: 0, x: -20 },
+    visible: {
+      opacity: 1,
+      x: 0,
+      transition: { duration: 0.3, when: "beforeChildren", staggerChildren: 0.1 },
+    },
+  };
+
+  const itemVariants = {
+    hidden: { opacity: 0, x: -10 },
+    visible: { opacity: 1, x: 0 },
+  };
+
+  const renderSidebarItems = (items: SidebarItem[], startDelay: number = 0) => {
+    return items.map((item, index) => {
+      const isActive =
+        pathname === item.href || pathname.startsWith(`${item.href}/`);
+
+      if (item.submenu) {
+        return (
+          <motion.div
+            key={item.href}
+            className="space-y-1"
+            variants={itemVariants}
+            transition={{ delay: startDelay + index * 0.05 }}
+          >
+            <Collapsible
+              open={openGroups[item.title.toLowerCase()] || isActive}
+              onOpenChange={() => toggleGroup(item.title.toLowerCase())}
+            >
+              <CollapsibleTrigger className="w-full">
+                <div
+                  className={cn(
+                    buttonVariants({ variant: 'ghost' }),
+                    "justify-between w-full hover:bg-muted/80 transition-colors",
+                    isActive && "bg-muted font-medium"
+                  )}
+                >
+                  <div className="flex items-center">
+                    <motion.div
+                      whileHover={{ rotate: isActive ? 0 : 10 }}
+                      className="text-primary"
+                    >
+                      {item.icon}
+                    </motion.div>
+                    <span className="ml-2">{item.title}</span>
+                  </div>
+                  <motion.div
+                    animate={{ rotate: openGroups[item.title.toLowerCase()] ? 180 : 0 }}
+                    transition={{ duration: 0.2 }}
+                  >
+                    <ChevronDown className="h-4 w-4" />
+                  </motion.div>
+                </div>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="pl-8 space-y-1 pt-1">
+                {item.submenu.map((subitem, subIndex) => {
+                  const isSubActive = pathname === subitem.href;
+                  return (
+                    <motion.div
+                      key={subitem.href}
+                      initial={{ opacity: 0, x: -5 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: 0.1 + subIndex * 0.05 }}
+                    >
+                      <Link
+                        href={subitem.href}
+                        className={cn(
+                          buttonVariants({ variant: 'ghost', size: 'sm' }),
+                          "justify-start w-full transition-all",
+                          isSubActive ? "bg-muted font-medium" : "hover:bg-muted/50"
+                        )}
+                      >
+                        <motion.div whileHover={{ scale: 1.1 }} className="text-primary">
+                          {subitem.icon}
+                        </motion.div>
+                        <span className="ml-2">{subitem.title}</span>
+                      </Link>
+                    </motion.div>
+                  );
+                })}
+              </CollapsibleContent>
+            </Collapsible>
+          </motion.div>
+        );
+      }
+
+      return (
+        <motion.div
+          key={item.href}
+          variants={itemVariants}
+          transition={{ delay: startDelay + index * 0.05 }}
+        >
+          <Link
+            href={item.href}
+            className={cn(
+              buttonVariants({ variant: 'ghost' }),
+              "justify-start w-full transition-colors",
+              isActive ? "bg-muted font-medium" : "hover:bg-muted/50"
+            )}
+          >
+            <motion.div whileHover={{ scale: 1.1 }} className="text-primary">
+              {item.icon}
+            </motion.div>
+            <span className="ml-2">{item.title}</span>
+          </Link>
+        </motion.div>
+      );
+    });
+  };
+
+  return (
+    <div className="hidden md:flex fixed top-16 h-[calc(100vh-4rem)] w-64 flex-col border-r bg-background">
+      <div className="flex flex-col h-full p-4 pt-6 overflow-hidden">
+        <motion.div
+          initial="hidden"
+          animate="visible"
+          variants={sidebarVariants}
+          className="flex flex-col gap-2"
+        >
+          {renderSidebarItems(sidebarItems, 0.3)}
+
+          {user?.role === 'admin' && adminItems.length > 0 && (
+            <>
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.8 }}
+                className="h-px bg-border my-4"
+              />
+              {renderSidebarItems(adminItems, 0.9)}
+            </>
+          )}
+        </motion.div>
+      </div>
+    </div>
+  );
+}
