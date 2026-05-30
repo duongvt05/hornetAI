@@ -4,7 +4,6 @@ import { useState, useEffect } from 'react';
 import Sidebar from './sidebar';
 import Header from './header';
 import { useAuth } from '@/components/providers/auth-provider';
-import { NotificationsProvider } from '@/components/providers/notifications-provider';
 import { useRouter } from 'next/navigation';
 import { Skeleton } from '@/components/ui/skeleton';
 
@@ -15,7 +14,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     setIsMounted(true);
-    
     if (!isLoading && !user) {
       router.push('/');
     }
@@ -51,27 +49,17 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (!user) {
-    return null;
-  }
+  if (!user) return null;
 
   return (
-    <NotificationsProvider>
-      <div className="h-screen flex flex-col overflow-hidden">
-        {/* Header is already sticky in its component */}
-        <Header />
-        
-        {/* Content area with fixed sidebar and scrollable main */}
-        <div className="flex flex-1 overflow-hidden">
-          {/* Sidebar - fixed, non-scrollable */}
-          <Sidebar />
-          
-          {/* Main content - only this should scroll */}
-          <main className="flex-1 md:ml-64 overflow-auto p-4 md:p-6 h-[calc(100vh-4rem)]">
-            {children}
-          </main>
-        </div>
+    <div className="h-screen flex flex-col overflow-hidden">
+      <Header />
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar />
+        <main className="flex-1 md:ml-64 overflow-auto p-4 md:p-6 h-[calc(100vh-4rem)]">
+          {children}
+        </main>
       </div>
-    </NotificationsProvider>
+    </div>
   );
 }

@@ -1,66 +1,55 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import type { Notification } from '@/lib/types';
 
 const BACKEND_URL = 'http://localhost:5000';
 
-// ── Module-level singleton state ─────────────────────────────────────────────
-// Lưu trữ ngoài React để tất cả các instance useNotifications() đều
-// chia sẻ CÙNG MỘT danh sách — tránh mỗi trang tạo state riêng.
-
+// ─── Singleton state ngoài React ────────────────────────────────────────────
+// Tất cả component gọi useNotifications() đều trỏ vào CÙNG mảng này.
 let sharedNotifications: Notification[] = [];
 const listeners = new Set<() => void>();
 
-function notifyAll() {
+function broadcast() {
   listeners.forEach(fn => fn());
 }
 
-function addNotification(notif: Notification) {
-  // Tránh duplicate nếu nhiều tab/component cùng nhận event
-  if (sharedNotifications.some(n => n.id === notif.id)) return;
-  sharedNotifications = [notif, ...sharedNotifications];
-  notifyAll();
-}
-
-function updateShared(updater: (prev: Notification[]) => Notification[]) {
-  sharedNotifications = updater(sharedNotifications);
-  notifyAll();
-}
-
-// ── SSE singleton — chỉ một kết nối duy nhất cho cả app ──────────────────────
+// ─── SSE singleton — chỉ MỘT kết nối cho cả app ────────────────────────────
 let esInstance: EventSource | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
-let connectionCount = 0; // Đếm số components đang mount
+let mountCount = 0;
 
 function connectSSE() {
-  if (esInstance) return; // Đã có kết nối rồi, không tạo thêm
+  if (esInstance) return;
 
   esInstance = new EventSource(`${BACKEND_URL}/events`);
 
   esInstance.onmessage = (e) => {
     if (e.data === 'connected' || e.data.startsWith(':')) return;
     try {
-      const event = JSON.parse(e.data);
-      if (!event.dominantSpecies && event.count === 0) return;
+      const raw = JSON.parse(e.data);
+      if (!raw.dominantSpecies && raw.count === 0) return;
 
       const notif: Notification = {
-        id: `notif-${event.id}`,
-        title: `🐝 Phát hiện ong tại ${event.cameraName || event.location}`,
-        message: `${event.count} cá thể – ${event.dominantSpecies ?? 'Không rõ loài'} – Độ tin cậy cao`,
-        timestamp: event.timestamp,
-        type: event.overallSeverity === 'critical' ? 'alert'
-            : event.overallSeverity === 'warning' ? 'warning' : 'info',
-        read: false,
-        nestId: event.cameraId,
-        location: event.location,
-        species: event.dominantSpecies,
-        confidence: event.detections?.[0]?.confidence,
-        link: `/dashboard/notifications`,
-        imageUrl: event.thumbnail ? `${BACKEND_URL}${event.thumbnail}` : undefined,
+        id:         `notif-${raw.id}`,
+        title:      `🐝 Phát hiện ong tại ${raw.cameraName || raw.location}`,
+        message:    `${raw.count} cá thể – ${raw.dominantSpecies ?? 'Không rõ loài'} – Độ tin cậy cao`,
+        timestamp:  raw.timestamp,
+        type:       raw.overallSeverity === 'critical' ? 'alert'
+                  : raw.overallSeverity === 'warning'  ? 'warning' : 'info',
+        read:       false,
+        nestId:     raw.cameraId,
+        location:   raw.location,
+        species:    raw.dominantSpecies,
+        confidence: raw.detections?.[0]?.confidence,
+        link:       `/dashboard/notifications`,
+        imageUrl:   raw.thumbnail ? `${BACKEND_URL}${raw.thumbnail}` : undefined,
       };
 
-      addNotification(notif);
+      // Tránh duplicate
+      if (sharedNotifications.some(n => n.id === notif.id)) return;
+      sharedNotifications = [notif, ...sharedNotifications];
+      broadcast();
     } catch {}
   };
 
@@ -72,57 +61,49 @@ function connectSSE() {
 }
 
 function disconnectSSE() {
-  if (retryTimer) clearTimeout(retryTimer);
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
   esInstance?.close();
   esInstance = null;
 }
 
-// ── Hook ──────────────────────────────────────────────────────────────────────
+function mutate(updater: (prev: Notification[]) => Notification[]) {
+  sharedNotifications = updater(sharedNotifications);
+  broadcast();
+}
+
+// ─── Hook ────────────────────────────────────────────────────────────────────
 
 export function useNotifications() {
-  // Dùng counter để trigger re-render khi sharedNotifications thay đổi
   const [, setTick] = useState(0);
 
   useEffect(() => {
-    // Đăng ký listener để nhận cập nhật từ singleton
     const rerender = () => setTick(t => t + 1);
     listeners.add(rerender);
-
-    // Khởi động SSE lần đầu (chỉ tạo 1 kết nối dù nhiều components mount)
-    connectionCount++;
+    mountCount++;
     connectSSE();
 
     return () => {
       listeners.delete(rerender);
-      connectionCount--;
-      // Chỉ đóng kết nối khi KHÔNG còn component nào đang dùng
-      if (connectionCount === 0) {
-        disconnectSSE();
-      }
+      mountCount--;
+      if (mountCount === 0) disconnectSSE();
     };
   }, []);
 
   const markAsRead = useCallback((id: string) => {
-    updateShared(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+    mutate(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
   }, []);
 
   const markAllAsRead = useCallback(() => {
-    updateShared(prev => prev.map(n => ({ ...n, read: true })));
+    mutate(prev => prev.map(n => ({ ...n, read: true })));
   }, []);
 
   const clearAllNotifications = useCallback(() => {
-    updateShared(() => []);
+    mutate(() => []);
   }, []);
 
   const clearNotification = useCallback((id: string) => {
-    updateShared(prev => prev.filter(n => n.id !== id));
+    mutate(prev => prev.filter(n => n.id !== id));
   }, []);
 
-  return {
-    notifications: sharedNotifications,
-    markAsRead,
-    markAllAsRead,
-    clearAllNotifications,
-    clearNotification,
-  };
+  return { notifications: sharedNotifications, markAsRead, markAllAsRead, clearAllNotifications, clearNotification };
 }
