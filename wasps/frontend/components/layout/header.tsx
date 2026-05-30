@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useAuth } from '@/components/providers/auth-provider';
 import { Button } from '@/components/ui/button';
 import { ModeToggle } from '@/components/layout/mode-toggle';
-import { Shield, Bell, X, Menu, LogOut, Settings as SettingsIcon } from 'lucide-react';
+import { Shield, Bell, Menu, LogOut, Settings as SettingsIcon } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import {
@@ -23,17 +23,16 @@ import {
   SheetTitle,
   SheetTrigger,
 } from '@/components/ui/sheet';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { useNotifications } from '@/lib/hooks/use-notifications';
 import { useGeneralSettings } from '@/hooks/use-general-settings';
 import { motion } from 'framer-motion';
-import Link from 'next/link'; // Import Link
+import Link from 'next/link';
 
 export default function Header() {
   const { user, logout } = useAuth();
   const router = useRouter();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const { notifications, clearNotification, markAllAsRead, markAsRead } = useNotifications(); // Replaced removeNotification with clearNotification
+  const { notifications } = useNotifications();
   const unreadCount = notifications.filter(n => !n.read).length;
   const { systemName } = useGeneralSettings();
 
@@ -48,23 +47,6 @@ export default function Header() {
       .map(part => part[0])
       .join('')
       .toUpperCase();
-  };
-
-  const getNotificationDotColor = (type: string) => {
-    switch (type) {
-      case 'success':
-        return 'bg-green-500';
-      case 'info':
-        return 'bg-blue-500';
-      case 'warning':
-        return 'bg-yellow-500';
-      case 'error':
-        return 'bg-red-500';
-      case 'alert':
-        return 'bg-orange-500';
-      default:
-        return 'bg-gray-400';
-    }
   };
 
   return (
@@ -89,7 +71,6 @@ export default function Header() {
                   {systemName}
                 </SheetTitle>
               </SheetHeader>
-              {/* Mobile navigation links rendered by the sidebar component */}
             </SheetContent>
           </Sheet>
         </div>
@@ -106,97 +87,30 @@ export default function Header() {
         
         <div className="flex-1 flex items-center justify-end ml-auto gap-4 md:gap-6 lg:gap-8">
           <div className="flex items-center gap-3">
-            <Popover>
-              <PopoverTrigger asChild>
-                <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
-                  <Button variant="outline" size="icon" className="relative">
-                    <Bell className="h-[1.2rem] w-[1.2rem]" />
-                    {unreadCount > 0 && (
-                      <motion.div
-                        initial={{ scale: 0 }}
-                        animate={{ scale: 1 }}
-                        transition={{ type: "spring", stiffness: 500, damping: 20 }}
+            {/* Bell button — click navigates to notifications page */}
+            <Link href="/dashboard/notifications">
+              <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
+                <Button variant="outline" size="icon" className="relative">
+                  <Bell className="h-[1.2rem] w-[1.2rem]" />
+                  {unreadCount > 0 && (
+                    <motion.div
+                      key={unreadCount}
+                      initial={{ scale: 0 }}
+                      animate={{ scale: 1 }}
+                      transition={{ type: "spring", stiffness: 500, damping: 20 }}
+                      className="absolute -top-1 -right-1"
+                    >
+                      <Badge 
+                        variant="destructive" 
+                        className="h-5 w-5 p-0 flex items-center justify-center text-[10px]"
                       >
-                        <Badge 
-                          variant="destructive" 
-                          className="absolute -top-1 -right-1 h-5 w-5 p-0 flex items-center justify-center text-[10px]"
-                        >
-                          {unreadCount}
-                        </Badge>
-                      </motion.div>
-                    )}
-                  </Button>
-                </motion.div>
-              </PopoverTrigger>
-              <PopoverContent className="w-[380px] p-0" align="end">
-                <div className="flex items-center justify-between p-3 border-b">
-                  <h4 className="font-medium">Notifications</h4>
-                  <div className="flex gap-1">
-                    {unreadCount > 0 && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={markAllAsRead}
-                        disabled={unreadCount === 0}
-                      >
-                        Mark all read
-                      </Button>
-                    )}
-                  </div>
-                </div>
-                <div className="max-h-[300px] overflow-y-auto">
-                  {notifications.length > 0 ? (
-                    <div>
-                      {notifications.slice(0, 5).map((notification, index) => ( // Displaying latest 5
-                        <motion.div
-                          key={notification.id}
-                          initial={{ opacity: 0, y: 10 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          transition={{ delay: index * 0.05, duration: 0.2 }}
-                          className={`flex items-start gap-3 p-3 hover:bg-muted/50 border-b last:border-0 transition ${!notification.read ? 'bg-muted/30 dark:bg-muted/20' : 'dark:hover:bg-muted/30'}`}
-                          onClick={() => {
-                            if (!notification.read) markAsRead(notification.id);
-                            if (notification.link) router.push(notification.link);
-                          }}
-                          style={{ cursor: notification.link || !notification.read ? 'pointer' : 'default' }}
-                        >
-                          <div className={`h-2.5 w-2.5 mt-1.5 rounded-full flex-shrink-0 ${getNotificationDotColor(notification.type)}`} />
-                          <div className="flex-1 flex flex-col gap-0.5">
-                            <span className="text-sm font-medium">{notification.title}</span>
-                            <span className="text-xs text-muted-foreground">{notification.message}</span>
-                            <span className="text-xs text-muted-foreground/80">{new Date(notification.timestamp).toLocaleString()}</span>
-                          </div>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-7 w-7 shrink-0"
-                            onClick={(e) => {
-                              e.stopPropagation(); // Prevent click on parent
-                              clearNotification(notification.id);
-                            }}
-                          >
-                            <X className="h-4 w-4" />
-                          </Button>
-                        </motion.div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="p-8 text-center text-muted-foreground">
-                      <p>No notifications</p>
-                    </div>
+                        {unreadCount > 99 ? '99+' : unreadCount}
+                      </Badge>
+                    </motion.div>
                   )}
-                </div>
-                {notifications.length > 0 && (
-                  <div className="p-2 border-t text-center">
-                    <Link href="/dashboard/notifications" passHref>
-                      <Button variant="link" size="sm" className="w-full">
-                        View all notifications
-                      </Button>
-                    </Link>
-                  </div>
-                )}
-              </PopoverContent>
-            </Popover>
+                </Button>
+              </motion.div>
+            </Link>
             
             <ModeToggle />
             

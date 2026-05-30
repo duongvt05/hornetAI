@@ -42,7 +42,7 @@ function connectSSE() {
         location:   raw.location,
         species:    raw.dominantSpecies,
         confidence: raw.detections?.[0]?.confidence,
-        link:       `/dashboard/notifications`,
+        link:       `/dashboard/detection-history`,
         imageUrl:   raw.thumbnail ? `${BACKEND_URL}${raw.thumbnail}` : undefined,
       };
 
