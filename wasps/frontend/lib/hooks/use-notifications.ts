@@ -4,31 +4,67 @@ import { useState, useEffect, useCallback } from 'react';
 import type { Notification } from '@/lib/types';
 
 const BACKEND_URL = 'http://localhost:5000';
+const STORAGE_KEY = 'hornet_notifications';
 
-// ─── Singleton state ngoài React ────────────────────────────────────────────
-// Tất cả component gọi useNotifications() đều trỏ vào CÙNG mảng này.
-let sharedNotifications: Notification[] = [];
+// ─── Persist helpers ─────────────────────────────────────────────────────────
+function loadFromStorage(): Notification[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveToStorage(notifications: Notification[]) {
+  if (typeof window === 'undefined') return;
+  try {
+    // Giữ tối đa 100 thông báo gần nhất
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(notifications.slice(0, 100)));
+  } catch {}
+}
+
+// ─── Singleton state ngoài React ─────────────────────────────────────────────
+let sharedNotifications: Notification[] = loadFromStorage();
 const listeners = new Set<() => void>();
 
 function broadcast() {
   listeners.forEach(fn => fn());
 }
 
-// ─── SSE singleton — chỉ MỘT kết nối cho cả app ────────────────────────────
+function mutate(updater: (prev: Notification[]) => Notification[]) {
+  sharedNotifications = updater(sharedNotifications);
+  saveToStorage(sharedNotifications);
+  broadcast();
+}
+
+// ─── SSE singleton — KHÔNG bao giờ tự disconnect khi navigate ───────────────
+// Chỉ disconnect khi tab đóng (beforeunload)
 let esInstance: EventSource | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
-let mountCount = 0;
+let sseStarted = false;  // chỉ start 1 lần
 
 function connectSSE() {
-  if (esInstance) return;
+  if (esInstance && esInstance.readyState !== EventSource.CLOSED) return;
 
+  console.log('[SSE] Connecting to', `${BACKEND_URL}/events`);
   esInstance = new EventSource(`${BACKEND_URL}/events`);
 
+  esInstance.onopen = () => {
+    console.log('[SSE] Connected ✅');
+  };
+
   esInstance.onmessage = (e) => {
-    if (e.data === 'connected' || e.data.startsWith(':')) return;
+    // Bỏ qua keepalive và connected message
+    const data = e.data?.trim();
+    if (!data || data === 'connected' || data.startsWith(':')) return;
+
     try {
-      const raw = JSON.parse(e.data);
-      if (!raw.dominantSpecies && raw.count === 0) return;
+      const raw = JSON.parse(data);
+
+      // Chỉ hiện thông báo khi thực sự phát hiện ong
+      if (!raw.dominantSpecies || raw.count === 0) return;
 
       const notif: Notification = {
         id:         `notif-${raw.id}`,
@@ -42,50 +78,61 @@ function connectSSE() {
         location:   raw.location,
         species:    raw.dominantSpecies,
         confidence: raw.detections?.[0]?.confidence,
-        link:       `/dashboard/detection-history`,
+        link:       `/dashboard/notifications`,
         imageUrl:   raw.thumbnail ? `${BACKEND_URL}${raw.thumbnail}` : undefined,
       };
 
       // Tránh duplicate
       if (sharedNotifications.some(n => n.id === notif.id)) return;
-      sharedNotifications = [notif, ...sharedNotifications];
-      broadcast();
-    } catch {}
+
+      console.log('[SSE] New notification:', notif.title);
+      mutate(prev => [notif, ...prev]);
+    } catch (err) {
+      console.warn('[SSE] Parse error:', err, 'raw data:', e.data);
+    }
   };
 
-  esInstance.onerror = () => {
+  esInstance.onerror = (err) => {
+    console.warn('[SSE] Connection error, retrying in 3s...', err);
     esInstance?.close();
     esInstance = null;
+    if (retryTimer) clearTimeout(retryTimer);
     retryTimer = setTimeout(connectSSE, 3000);
   };
 }
 
-function disconnectSSE() {
-  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
-  esInstance?.close();
-  esInstance = null;
-}
+// Khởi động SSE ngay khi module được load (client-side only)
+// Không phụ thuộc vào component lifecycle
+if (typeof window !== 'undefined' && !sseStarted) {
+  sseStarted = true;
+  connectSSE();
 
-function mutate(updater: (prev: Notification[]) => Notification[]) {
-  sharedNotifications = updater(sharedNotifications);
-  broadcast();
+  // Cleanup khi tab đóng
+  window.addEventListener('beforeunload', () => {
+    if (retryTimer) clearTimeout(retryTimer);
+    esInstance?.close();
+  });
 }
 
 // ─── Hook ────────────────────────────────────────────────────────────────────
-
 export function useNotifications() {
   const [, setTick] = useState(0);
 
   useEffect(() => {
+    // Đăng ký re-render khi có notification mới
     const rerender = () => setTick(t => t + 1);
     listeners.add(rerender);
-    mountCount++;
-    connectSSE();
+
+    // Đảm bảo SSE đang chạy (phòng trường hợp cold start)
+    if (typeof window !== 'undefined' && !sseStarted) {
+      sseStarted = true;
+      connectSSE();
+    }
 
     return () => {
       listeners.delete(rerender);
-      mountCount--;
-      if (mountCount === 0) disconnectSSE();
+      // KHÔNG disconnect SSE khi component unmount
+      // SSE chạy suốt phiên làm việc
     };
   }, []);
 
@@ -105,5 +152,11 @@ export function useNotifications() {
     mutate(prev => prev.filter(n => n.id !== id));
   }, []);
 
-  return { notifications: sharedNotifications, markAsRead, markAllAsRead, clearAllNotifications, clearNotification };
+  return {
+    notifications: sharedNotifications,
+    markAsRead,
+    markAllAsRead,
+    clearAllNotifications,
+    clearNotification,
+  };
 }

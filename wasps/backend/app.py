@@ -6,7 +6,6 @@ import os
 import uuid
 import cv2
 import numpy as np
-import queue
 import threading
 import time
 import requests as req
@@ -14,9 +13,7 @@ from collections import Counter
 
 # ─── KHỞI TẠO APP ────────────────────────────────────────────────────────────
 app = Flask(__name__)
-CORS(app)
-
-detection_queue = queue.Queue()
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 UPLOAD_FOLDER    = "uploads"
 DETECTION_FOLDER = "detections"
@@ -26,9 +23,42 @@ os.makedirs(DETECTION_FOLDER, exist_ok=True)
 model   = YOLO("best.pt")
 history = []
 
-# Cooldown per camera: tránh spam thông báo (giây)
+# ─── PUB/SUB SSE (fix: mỗi subscriber nhận được mọi event) ──────────────────
+# Thay queue đơn bằng danh sách các queue riêng cho từng SSE client
+_subscribers: list = []
+_sub_lock = threading.Lock()
+
+def _publish(event: dict):
+    """Gửi event tới TẤT CẢ SSE clients đang kết nối."""
+    import queue
+    with _sub_lock:
+        dead = []
+        for q in _subscribers:
+            try:
+                q.put_nowait(event)
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            _subscribers.remove(q)
+
+def _subscribe():
+    """Tạo queue mới cho 1 SSE client, trả về queue."""
+    import queue
+    q = queue.Queue()
+    with _sub_lock:
+        _subscribers.append(q)
+    return q
+
+def _unsubscribe(q):
+    with _sub_lock:
+        try:
+            _subscribers.remove(q)
+        except ValueError:
+            pass
+
+# Cooldown per camera
 ALERT_COOLDOWN    = 30
-camera_last_alert = {}   # { camera_id: timestamp }
+camera_last_alert = {}
 camera_lock       = threading.Lock()
 
 # ─── TELEGRAM CONFIG ──────────────────────────────────────────────────────────
@@ -115,7 +145,7 @@ def build_detection_entry(species: str, confidence: float, count: int) -> dict:
     }
 
 def create_and_dispatch_event(detections: list, frame, cam_id: str, cam_name: str, location: str):
-    """Tạo event, lưu ảnh, đẩy vào SSE queue và gửi Telegram."""
+    """Tạo event, lưu ảnh, publish tới TẤT CẢ SSE subscribers và gửi Telegram."""
     if not detections:
         return
 
@@ -126,7 +156,6 @@ def create_and_dispatch_event(detections: list, frame, cam_id: str, cam_name: st
     )
     dominant = Counter(d["species"] for d in detections).most_common(1)[0][0]
 
-    # Lưu ảnh frame
     filename   = f"{uuid.uuid4()}.jpg"
     image_path = os.path.join(UPLOAD_FOLDER, filename)
     cv2.imwrite(image_path, frame)
@@ -147,33 +176,42 @@ def create_and_dispatch_event(detections: list, frame, cam_id: str, cam_name: st
     }
 
     history.append(event)
-    detection_queue.put(event)
+    _publish(event)   # <-- pub/sub: mọi SSE client đều nhận
     threading.Thread(target=send_telegram, args=(event,), daemon=True).start()
-    print(f"🔔 [{cam_id}] Phát hiện {len(detections)} ong – {dominant}")
+    print(f"🔔 [{cam_id}] Phát hiện {len(detections)} ong – {dominant} → published to {len(_subscribers)} clients")
 
 # ─── SSE ENDPOINT ─────────────────────────────────────────────────────────────
 @app.route("/events")
 def stream_events():
-    """SSE endpoint – frontend subscribe để nhận thông báo realtime."""
+    """SSE endpoint – mỗi client có queue riêng, nhận đầy đủ mọi event."""
+    import json, queue as qmod
+    client_queue = _subscribe()
+
     def generate():
-        import json
         yield "data: connected\n\n"
-        while True:
-            try:
-                event = detection_queue.get(timeout=30)
-                yield f"data: {json.dumps(event)}\n\n"
-            except queue.Empty:
-                yield ": ping\n\n"
+        try:
+            while True:
+                try:
+                    event = client_queue.get(timeout=25)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except qmod.Empty:
+                    yield ": ping\n\n"
+        finally:
+            _unsubscribe(client_queue)
+
     return Response(
         generate(),
         mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control":    "no-cache",
+            "X-Accel-Buffering":"no",
+            "Access-Control-Allow-Origin": "*",
+        },
     )
 
 # ─── VIDEO STREAMING (MJPEG) + PHÁT HIỆN THÔNG BÁO ──────────────────────────
 @app.route("/stream/<video_name>")
 def stream_video(video_name):
-    # Lấy thông tin camera từ query params (frontend truyền lên)
     cam_id   = request.args.get("camId",   video_name)
     cam_name = request.args.get("camName", video_name)
     location = request.args.get("location", "Live Camera")
@@ -194,7 +232,6 @@ def stream_video(video_name):
             results         = model(frame, conf=0.4, verbose=False)
             annotated_frame = results[0].plot()
 
-            # ── PHÁT HIỆN ONG → TẠO THÔNG BÁO (có cooldown) ──────────────
             boxes = results[0].boxes
             if boxes and len(boxes) > 0:
                 with camera_lock:
@@ -208,7 +245,6 @@ def stream_video(video_name):
                             species    = model.names[cls_id]
                             confidence = float(box.conf[0])
                             detections.append(build_detection_entry(species, confidence, len(boxes)))
-                        # Chạy trong thread riêng để không block stream
                         threading.Thread(
                             target=create_and_dispatch_event,
                             args=(detections, frame.copy(), cam_id, cam_name, location),
@@ -251,14 +287,13 @@ def detect():
 
     severity_order   = {"critical": 0, "warning": 1, "info": 2}
     overall_severity = "info"
+    dominant = None
+
     if detections:
         overall_severity = min(
             [d["severity"] for d in detections],
             key=lambda s: severity_order.get(s, 99),
         )
-
-    dominant = None
-    if detections:
         dominant = Counter(d["species"] for d in detections).most_common(1)[0][0]
 
     event = {
@@ -277,8 +312,10 @@ def detect():
     }
 
     history.append(event)
-    detection_queue.put(event)
-    threading.Thread(target=send_telegram, args=(event,), daemon=True).start()
+    # Chỉ publish SSE nếu thực sự phát hiện ong
+    if detections:
+        _publish(event)
+        threading.Thread(target=send_telegram, args=(event,), daemon=True).start()
     return jsonify(event)
 
 @app.route("/history", methods=["GET"])
@@ -299,7 +336,6 @@ def clear_history():
 
 @app.route("/uploads/<path:filename>", methods=["GET"])
 def serve_upload(filename: str):
-    """Serve ảnh đã upload từ thư mục uploads."""
     return send_from_directory(os.path.abspath(UPLOAD_FOLDER), filename)
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
