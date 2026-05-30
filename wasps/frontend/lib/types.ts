@@ -121,4 +121,9 @@ export type Notification = {
   read: boolean;
   imageUrl?: string;
   link?: string; // Optional link for navigation on click
+   // ── Thêm 4 dòng này vào đây ──
+  nestId?: string;
+  location?: string;
+  species?: string;
+  confidence?: number;
 };

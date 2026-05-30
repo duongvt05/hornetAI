@@ -47,3 +47,6 @@ weights/
 *.pth
 *.h5
 *.ckpt
+# .env
+TELEGRAM_TOKEN=8676031026:AAHfr0_eLle3eFq0hv1yU26boHB9V3oaMQM
+TELEGRAM_CHAT_ID=8797482742
