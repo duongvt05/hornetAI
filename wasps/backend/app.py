@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_from_directory
 from flask_cors import CORS
 from ultralytics import YOLO
 from datetime import datetime
@@ -296,6 +296,11 @@ def get_history_event(event_id: str):
 def clear_history():
     history.clear()
     return jsonify({"message": "History cleared"})
+
+@app.route("/uploads/<path:filename>", methods=["GET"])
+def serve_upload(filename: str):
+    """Serve ảnh đã upload từ thư mục uploads."""
+    return send_from_directory(os.path.abspath(UPLOAD_FOLDER), filename)
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":

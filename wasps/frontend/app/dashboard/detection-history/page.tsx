@@ -453,11 +453,24 @@ export default function DetectionHistoryPage() {
                         {/* Icon + info */}
                         <div className="flex gap-4 items-start sm:items-center w-full sm:w-auto">
                           <div className="relative h-16 w-16 rounded-md overflow-hidden bg-muted flex-shrink-0 border border-border/60 flex items-center justify-center">
-                            {event.source === "image" ? (
-                              <ImageIcon className="w-7 h-7 text-muted-foreground/40" />
-                            ) : (
-                              <Film className="w-7 h-7 text-muted-foreground/40" />
-                            )}
+                            {event.thumbnail ? (
+                              <img
+                                src={`${API_BASE}${event.thumbnail}`}
+                                alt={event.dominantSpecies ?? "detection"}
+                                className="h-full w-full object-cover"
+                                onError={(e) => {
+                                  (e.currentTarget as HTMLImageElement).style.display = "none";
+                                  (e.currentTarget.nextElementSibling as HTMLElement | null)?.removeAttribute("hidden");
+                                }}
+                              />
+                            ) : null}
+                            <span hidden={!!event.thumbnail} className="flex items-center justify-center w-full h-full">
+                              {event.source === "image" ? (
+                                <ImageIcon className="w-7 h-7 text-muted-foreground/40" />
+                              ) : (
+                                <Film className="w-7 h-7 text-muted-foreground/40" />
+                              )}
+                            </span>
                           </div>
 
                           <div className="space-y-1">
@@ -658,6 +671,20 @@ export default function DetectionHistoryPage() {
             </DialogHeader>
 
             <div className="space-y-4 mt-2">
+              {/* Thumbnail */}
+              {selectedEvent.thumbnail && (
+                <div className="rounded-lg overflow-hidden border border-border/40 bg-muted max-h-64 flex items-center justify-center">
+                  <img
+                    src={`${API_BASE}${selectedEvent.thumbnail}`}
+                    alt={selectedEvent.dominantSpecies ?? "detection"}
+                    className="w-full max-h-64 object-contain"
+                    onError={(e) => {
+                      (e.currentTarget as HTMLImageElement).parentElement!.style.display = "none";
+                    }}
+                  />
+                </div>
+              )}
+
               {/* Overall status */}
               <div className="flex items-center gap-3">
                 {getSeverityBadge(selectedEvent.overallSeverity)}
