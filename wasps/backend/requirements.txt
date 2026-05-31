@@ -1,6 +1,13 @@
 flask
 flask-cors
+flask-sqlalchemy
+flask-migrate
+flask-bcrypt
+flask-jwt-extended
 ultralytics
 opencv-python
 numpy
 pillow
+python-dotenv
+pymysql
+cryptography
