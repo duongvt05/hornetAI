@@ -27,7 +27,21 @@ export type StreamInfo = {
 };
 
 // Backend API base URL
-const API_BASE_URL = 'http://localhost:8000/api/v1';
+const API_BASE_URL = 'http://localhost:5000/api/v1';
+
+// Helper: lấy JWT token từ localStorage
+function getToken(): string {
+  if (typeof window !== 'undefined') return localStorage.getItem('hornet-token') || '';
+  return '';
+}
+
+// Helper: build Authorization header
+function authHeaders(): HeadersInit {
+  const token = getToken();
+  return token
+    ? { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }
+    : { 'Content-Type': 'application/json' };
+}
 
 // Available filter types
 export const AVAILABLE_FILTERS = [
@@ -39,20 +53,41 @@ export const AVAILABLE_FILTERS = [
 ];
 
 /**
- * Fetches all cameras from the backend API
- * GET /api/v1/contextual/cameras
+ * Fetches cameras từ /api/v1/cameras (requires JWT).
+ * Nếu trả về rỗng hoặc lỗi, fallback sang lấy từ /history
+ * (history luôn có cameraId + cameraName từ detection thực tế).
  */
 export const fetchCameras = async (): Promise<Camera[]> => {
+  // Thử lấy từ /api/v1/cameras trước
   try {
-    const response = await fetch(`${API_BASE_URL}/contextual/cameras`);
-    if (!response.ok) {
-      throw new Error(`Error: ${response.status}`);
+    const response = await fetch(`${API_BASE_URL}/cameras`, {
+      headers: authHeaders(),
+    });
+    if (response.ok) {
+      const data: Camera[] = await response.json();
+      if (data && data.length > 0) return data;
     }
-    return await response.json();
-  } catch (error) {
-    console.error('Failed to fetch cameras:', error);
-    throw error;
+  } catch {
+    // bỏ qua, tiếp tục fallback
   }
+
+  // Fallback: lấy danh sách camera unique từ /history (không cần JWT)
+  const res = await fetch(`${API_BASE_URL.replace('/api/v1','')}/history?per_page=200`);
+  if (!res.ok) throw new Error(`History error: ${res.status}`);
+  const events: Array<{ cameraId: string; cameraName: string }> = await res.json();
+
+  const map = new Map<string, Camera>();
+  for (const e of events) {
+    if (e.cameraId && !map.has(e.cameraId)) {
+      map.set(e.cameraId, {
+        id: e.cameraId,
+        name: e.cameraName || e.cameraId,
+        rtsp_url: '',
+        status: 'online',
+      });
+    }
+  }
+  return Array.from(map.values());
 };
 
 /**
@@ -61,7 +96,9 @@ export const fetchCameras = async (): Promise<Camera[]> => {
  */
 export const fetchCameraById = async (cameraId: string): Promise<Camera> => {
   try {
-    const response = await fetch(`${API_BASE_URL}/cameras/${cameraId}`);
+    const response = await fetch(`${API_BASE_URL}/cameras/${cameraId}`, {
+      headers: authHeaders(),
+    });
     if (!response.ok) {
       throw new Error(`Error: ${response.status}`);
     }
@@ -78,7 +115,9 @@ export const fetchCameraById = async (cameraId: string): Promise<Camera> => {
  */
 export const fetchCameraByName = async (name: string): Promise<Camera> => {
   try {
-    const response = await fetch(`${API_BASE_URL}/cameras/by-name/${encodeURIComponent(name)}`);
+    const response = await fetch(`${API_BASE_URL}/cameras/by-name/${encodeURIComponent(name)}`, {
+      headers: authHeaders(),
+    });
     if (!response.ok) {
       throw new Error(`Error: ${response.status}`);
     }
@@ -174,6 +213,7 @@ export const deleteCameraById = async (cameraId: string): Promise<void> => {
   try {
     const response = await fetch(`${API_BASE_URL}/cameras/${cameraId}`, {
       method: 'DELETE',
+      headers: authHeaders(),
     });
     
     if (!response.ok) {
@@ -193,6 +233,7 @@ export const deleteCameraByName = async (name: string): Promise<void> => {
   try {
     const response = await fetch(`${API_BASE_URL}/cameras/by-name/${encodeURIComponent(name)}`, {
       method: 'DELETE',
+      headers: authHeaders(),
     });
     
     if (!response.ok) {

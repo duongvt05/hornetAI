@@ -92,6 +92,9 @@ export default function AiAssistant() {
   const [mode, setMode]                     = useState<ChatMode>('general');
   const [geminiHistory, setGeminiHistory]   = useState<GeminiTurn[]>([]);
 
+  // Tên camera đang được chọn (dùng để inject vào context)
+  const selectedCameraName = cameras.find(c => c.id === selectedCamera)?.name ?? selectedCamera;
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef    = useRef<HTMLTextAreaElement>(null);
   const { toast }      = useToast();
@@ -101,9 +104,12 @@ export default function AiAssistant() {
     fetchCameras()
       .then(data => {
         setCameras(data);
-        if (data.length > 0 && data[0].id) setSelectedCamera(data[0].id);
+        if (data.length > 0 && data[0].id) setSelectedCamera(String(data[0].id));
       })
-      .catch(() => {/* cameras optional for general mode */});
+      .catch((err) => {
+        console.warn('fetchCameras failed:', err?.message);
+        // Không block UI — camera chỉ cần thiết ở chế độ Camera
+      });
 
     setMessages([{
       id: 'welcome',
@@ -143,39 +149,71 @@ export default function AiAssistant() {
         // ── Camera mode: gọi backend YOLO gốc ─────────────────────────────
         if (!selectedCamera) throw new Error('Vui lòng chọn một camera');
 
-        const res = await submitQuery({ camera_id: selectedCamera, query: text });
+        // Đưa tên camera vào câu hỏi để backend/AI có context rõ ràng hơn
+        const queryWithContext = selectedCameraName
+          ? `[Camera: ${selectedCameraName}] ${text}`
+          : text;
+
+        const res = await submitQuery({
+          camera_id: selectedCamera,
+          query: queryWithContext,
+        });
+
+        if (!res.success) throw new Error(res.error ?? 'Lỗi không xác định từ backend');
 
         setMessages(prev => prev.map(m =>
           m.id === userMsgId ? { ...m, status: 'complete' } :
           m.id === asstMsgId ? {
             ...m,
-            content:      res.success ? (res.response ?? 'AI xử lý xong nhưng không có nội dung.') : (res.error ?? 'Lỗi không xác định.'),
-            status:       res.success ? 'complete' : 'error',
+            content:      res.response ?? 'AI xử lý xong nhưng không có nội dung.',
+            status:       'complete',
             image_base64: res.image_base64,
           } : m
         ));
 
       } else {
         // ── General mode: gọi /api/v1/ai/chat (Gemini qua Flask) ──────────
-        const response = await fetch(`${API_BASE}/api/v1/ai/chat`, {
-          method:  'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${getToken()}`,
-          },
-          body: JSON.stringify({
-            message: text,
-            history: geminiHistory,
-          }),
-        });
+        const token = getToken();
+        if (!token) throw new Error('Bạn chưa đăng nhập. Vui lòng đăng nhập để dùng AI chat.');
+
+        // Nếu người dùng đang chọn camera, thêm tên camera vào context tin nhắn
+        const contextPrefix = selectedCameraName
+          ? `[Đang xem camera: ${selectedCameraName}] `
+          : '';
+        const messageWithContext = contextPrefix + text;
+
+        let response: Response;
+        try {
+          response = await fetch(`${API_BASE}/api/v1/ai/chat`, {
+            method:  'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              message: messageWithContext,
+              history: geminiHistory,
+            }),
+          });
+        } catch (networkErr: any) {
+          throw new Error(`Không kết nối được đến server (${API_BASE}). Hãy kiểm tra backend đang chạy chưa.`);
+        }
+
+        if (response.status === 401) {
+          throw new Error('Phiên đăng nhập hết hạn. Vui lòng đăng xuất và đăng nhập lại.');
+        }
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error ?? `Lỗi HTTP ${response.status} từ server`);
+        }
 
         const data = await response.json();
         if (!data.success) throw new Error(data.error ?? `HTTP ${response.status}`);
 
-        // Cập nhật history cho lượt tiếp theo
+        // Cập nhật history cho lượt tiếp theo (lưu text gốc không có prefix để UX sạch hơn)
         setGeminiHistory(prev => [
           ...prev,
-          { role: 'user',  parts: [{ text }] },
+          { role: 'user',  parts: [{ text: messageWithContext }] },
           { role: 'model', parts: [{ text: data.response }] },
         ]);
 
@@ -229,7 +267,9 @@ export default function AiAssistant() {
             <CardDescription>
               {mode === 'general'
                 ? 'Hỏi đáp về ong bắp cày, bảo vệ tổ ong'
-                : 'Phân tích trực tiếp từ camera'}
+                : selectedCameraName
+                  ? `Phân tích trực tiếp từ: ${selectedCameraName}`
+                  : 'Phân tích trực tiếp từ camera'}
             </CardDescription>
           </div>
 
@@ -282,6 +322,12 @@ export default function AiAssistant() {
         {mode === 'general' && geminiHistory.length > 0 && (
           <Badge variant="secondary" className="text-xs w-fit mt-1">
             {geminiHistory.length / 2} lượt — AI đang nhớ ngữ cảnh
+          </Badge>
+        )}
+        {mode === 'camera' && selectedCameraName && (
+          <Badge variant="outline" className="text-xs w-fit mt-1 gap-1">
+            <Camera className="h-3 w-3" />
+            {selectedCameraName}
           </Badge>
         )}
       </CardHeader>
@@ -362,7 +408,9 @@ export default function AiAssistant() {
             ref={textareaRef}
             placeholder={
               mode === 'camera'
-                ? 'Hỏi về những gì camera đang thấy... (Enter gửi)'
+                ? selectedCameraName
+                  ? `Hỏi về ${selectedCameraName}... (Enter gửi)`
+                  : 'Hỏi về những gì camera đang thấy... (Enter gửi)'
                 : 'Hỏi về ong bắp cày, bảo vệ tổ ong... (Enter gửi, Shift+Enter xuống dòng)'
             }
             value={query}
