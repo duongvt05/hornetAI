@@ -1,284 +1,334 @@
 "use client"
 
-import { useState, useEffect, useRef } from 'react';
-import { BrainCircuit, SendHorizonal, Loader2 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+/**
+ * AiAssistant - Nâng cấp với 2 chế độ:
+ * 1. "Hỏi đáp" - Chat với Gemini AI về ong bắp cày (qua Flask backend)
+ * 2. "Camera"  - Hỏi về những gì camera thấy (logic gốc giữ nguyên)
+ */
+
+import { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  BrainCircuit, SendHorizontal, Loader2,
+  Camera, MessageSquare, Trash2,
+} from 'lucide-react';
+import { Button }   from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
+import {
+  Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle,
+} from '@/components/ui/card';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
+import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
-import { Camera, fetchCameras } from '@/lib/services/cameraService';
-import { 
-  submitQuery, 
-  // checkQueryStatus // Removed as it's no longer used
-} from '@/lib/services/aiAssistantService';
+import { Camera as CameraType, fetchCameras } from '@/lib/services/cameraService';
+import { submitQuery } from '@/lib/services/aiAssistantService';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+type MessageRole   = 'user' | 'assistant' | 'system';
+type MessageStatus = 'sending' | 'processing' | 'complete' | 'error';
+type ChatMode      = 'camera' | 'general';
 
 interface Message {
-  id: string;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  timestamp: Date;
-  status?: 'sending' | 'processing' | 'complete' | 'error';
+  id:            string;
+  role:          MessageRole;
+  content:       string;
+  timestamp:     Date;
+  status?:       MessageStatus;
   image_base64?: string;
+  mode?:         ChatMode;
 }
 
+// Gemini conversation history format
+interface GeminiTurn {
+  role:  'user' | 'model';
+  parts: { text: string }[];
+}
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const API_BASE = 'http://localhost:5000';
+
+function getToken() {
+  if (typeof window !== 'undefined') return localStorage.getItem('hornet-token') || '';
+  return '';
+}
+
+const SUGGESTED_CAMERA = [
+  'Camera đang thấy gì?',
+  'Có ong bắp cày xuất hiện không?',
+  'Chụp ảnh hiện tại cho tôi xem',
+  'Mức độ nguy hiểm hiện tại là bao nhiêu?',
+];
+
+const SUGGESTED_GENERAL = [
+  'Vespa velutina nguy hiểm thế nào với ong mật?',
+  'Phân biệt ong bắp cày châu Á và châu Âu?',
+  'Mùa nào ong bắp cày hoạt động mạnh nhất?',
+  'Cách đặt bẫy ong bắp cày hiệu quả?',
+  'Thu hẹp cửa tổ ong để làm gì?',
+];
+
+// ── Simple markdown renderer ──────────────────────────────────────────────────
+function renderMarkdown(text: string) {
+  const html = text
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code class="bg-black/10 dark:bg-white/10 px-1 rounded text-xs font-mono">$1</code>')
+    .replace(/^### (.*$)/gm, '<p class="font-bold mt-2">$1</p>')
+    .replace(/^## (.*$)/gm,  '<p class="font-bold text-base mt-3">$1</p>')
+    .replace(/^- (.*$)/gm,   '<li class="ml-4 list-disc">$1</li>')
+    .replace(/\n\n/g, '<br/><br/>')
+    .replace(/\n/g,   '<br/>');
+  return <div dangerouslySetInnerHTML={{ __html: html }} className="leading-relaxed" />;
+}
+
+// ── Main Component ────────────────────────────────────────────────────────────
 export default function AiAssistant() {
-  const [cameras, setCameras] = useState<Camera[]>([]);
-  const [selectedCamera, setSelectedCamera] = useState<string>("");
-  const [query, setQuery] = useState<string>("");
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [isProcessingQuery, setIsProcessingQuery] = useState<boolean>(false);
+  const [cameras, setCameras]               = useState<CameraType[]>([]);
+  const [selectedCamera, setSelectedCamera] = useState('');
+  const [query, setQuery]                   = useState('');
+  const [messages, setMessages]             = useState<Message[]>([]);
+  const [isProcessing, setIsProcessing]     = useState(false);
+  const [mode, setMode]                     = useState<ChatMode>('general');
+  const [geminiHistory, setGeminiHistory]   = useState<GeminiTurn[]>([]);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const { toast } = useToast();
+  const textareaRef    = useRef<HTMLTextAreaElement>(null);
+  const { toast }      = useToast();
 
-  // Load cameras on component mount
+  // ── Load cameras ─────────────────────────────────────────────────────────
   useEffect(() => {
-    async function loadCameras() {
-      try {
-        const camerasData = await fetchCameras();
-        setCameras(camerasData);
-        
-        // Select the first camera by default if available
-        if (camerasData.length > 0 && camerasData[0].id) {
-          setSelectedCamera(camerasData[0].id);
-        }
-      } catch (error) {
-        console.error('Failed to load cameras:', error);
-        toast({
-          title: 'Error',
-          description: 'Failed to load cameras. Please try again.',
-          variant: 'destructive',
-        });
-      }
-    }
+    fetchCameras()
+      .then(data => {
+        setCameras(data);
+        if (data.length > 0 && data[0].id) setSelectedCamera(data[0].id);
+      })
+      .catch(() => {/* cameras optional for general mode */});
 
-    // Add welcome message
-    setMessages([
-      {
-        id: 'welcome',
-        role: 'system',
-        content: 'Welcome to AI Assistant! Select a camera and ask questions about what the camera sees.',
-        timestamp: new Date(),
-        status: 'complete'
-      }
-    ]);
-
-    loadCameras();
+    setMessages([{
+      id: 'welcome',
+      role: 'system',
+      content: '👋 Xin chào! Tôi là trợ lý AI của HornetAI.\n\n**Hỏi đáp chung** — Hỏi tôi về ong bắp cày, bảo vệ tổ ong, nhận dạng loài...\n\n**Chế độ Camera** — Hỏi về những gì camera đang nhìn thấy theo thời gian thực.',
+      timestamp: new Date(),
+      status: 'complete',
+    }]);
   }, []);
 
-  // Scroll to bottom of messages when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Function to handle camera selection
-  const handleCameraChange = (cameraId: string) => {
-    setSelectedCamera(cameraId);
-  };
+  // ── Send message ──────────────────────────────────────────────────────────
+  const handleSend = useCallback(async () => {
+    const text = query.trim();
+    if (!text || isProcessing) return;
 
-  // Function to handle sending a query
-  const handleSendQuery = async () => {
-    if (!selectedCamera) {
-      toast({
-        title: 'Error',
-        description: 'Please select a camera first.',
-        variant: 'destructive',
-      });
-      return;
-    }
+    const userMsgId = `user-${Date.now()}`;
+    const asstMsgId = `asst-${Date.now()}`;
 
-    const currentQuery = query.trim(); // Capture query before clearing
-    if (!currentQuery) {
-      toast({
-        title: 'Error',
-        description: 'Please enter a query.',
-        variant: 'destructive',
-      });
-      return;
-    }
+    setMessages(prev => [...prev, {
+      id: userMsgId, role: 'user', content: text,
+      timestamp: new Date(), status: 'sending', mode,
+    }]);
+    setQuery('');
+    setIsProcessing(true);
 
-    const userMessageId = `user-${Date.now()}`;
-    const assistantMessageId = `assistant-${Date.now()}`;
-
-    // Add user message
-    setMessages(prev => [
-      ...prev,
-      {
-        id: userMessageId,
-        role: 'user',
-        content: currentQuery,
-        timestamp: new Date(),
-        status: 'sending'
-      }
-    ]);
-
-    setQuery(""); // Clear input field
-    setIsProcessingQuery(true);
-
-    // Add assistant message placeholder (status: 'processing')
-    setMessages(prev => [
-      ...prev,
-      {
-        id: assistantMessageId,
-        role: 'assistant',
-        content: 'Processing your query...',
-        timestamp: new Date(),
-        status: 'processing'
-      }
-    ]);
+    setMessages(prev => [...prev, {
+      id: asstMsgId, role: 'assistant', content: '',
+      timestamp: new Date(), status: 'processing', mode,
+    }]);
 
     try {
-      // Submit query to API
-      const apiResponse = await submitQuery({
-        camera_id: selectedCamera,
-        query: currentQuery
-      });
+      if (mode === 'camera') {
+        // ── Camera mode: gọi backend YOLO gốc ─────────────────────────────
+        if (!selectedCamera) throw new Error('Vui lòng chọn một camera');
 
-      // Update user message status to 'complete'
-      setMessages(prev => prev.map(msg => 
-        msg.id === userMessageId ? { ...msg, status: 'complete' } : msg
-      ));
+        const res = await submitQuery({ camera_id: selectedCamera, query: text });
 
-      if (apiResponse.success) {
-        // Update assistant message with successful response
-        setMessages(prev => prev.map(msg => 
-          msg.id === assistantMessageId ? { 
-            ...msg, 
-            content: apiResponse.response || 'AI processed the request but returned no specific text.',
-            status: 'complete',
-            image_base64: apiResponse.image_base64 // Handles if image_base64 is present or not
-          } : msg
+        setMessages(prev => prev.map(m =>
+          m.id === userMsgId ? { ...m, status: 'complete' } :
+          m.id === asstMsgId ? {
+            ...m,
+            content:      res.success ? (res.response ?? 'AI xử lý xong nhưng không có nội dung.') : (res.error ?? 'Lỗi không xác định.'),
+            status:       res.success ? 'complete' : 'error',
+            image_base64: res.image_base64,
+          } : m
         ));
+
       } else {
-        // Update assistant message with error from API response
-        const errorMessage = apiResponse.error || 'An unknown error occurred during AI processing.';
-        setMessages(prev => prev.map(msg => 
-          msg.id === assistantMessageId ? { 
-            ...msg, 
-            content: errorMessage, 
-            status: 'error' 
-          } : msg
-        ));
-        toast({
-          title: 'AI Processing Error',
-          description: errorMessage,
-          variant: 'destructive',
+        // ── General mode: gọi /api/v1/ai/chat (Gemini qua Flask) ──────────
+        const response = await fetch(`${API_BASE}/api/v1/ai/chat`, {
+          method:  'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${getToken()}`,
+          },
+          body: JSON.stringify({
+            message: text,
+            history: geminiHistory,
+          }),
         });
+
+        const data = await response.json();
+        if (!data.success) throw new Error(data.error ?? `HTTP ${response.status}`);
+
+        // Cập nhật history cho lượt tiếp theo
+        setGeminiHistory(prev => [
+          ...prev,
+          { role: 'user',  parts: [{ text }] },
+          { role: 'model', parts: [{ text: data.response }] },
+        ]);
+
+        setMessages(prev => prev.map(m =>
+          m.id === userMsgId ? { ...m, status: 'complete' } :
+          m.id === asstMsgId ? { ...m, content: data.response, status: 'complete' } : m
+        ));
       }
-    } catch (error) {
-      console.error('Failed to send query:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Failed to connect to the AI service or an unexpected error occurred.';
 
-      // Update user message status to 'error'
-      setMessages(prev => prev.map(msg => 
-        msg.id === userMessageId ? { ...msg, status: 'error' } : msg
+    } catch (error: any) {
+      const msg = error?.message ?? 'Lỗi không xác định';
+      setMessages(prev => prev.map(m =>
+        m.id === userMsgId ? { ...m, status: 'error' } :
+        m.id === asstMsgId ? { ...m, content: `❌ ${msg}`, status: 'error' } : m
       ));
-
-      // Update assistant message with the error
-      setMessages(prev => prev.map(msg => 
-        msg.id === assistantMessageId ? { 
-          ...msg, 
-          content: `Error: ${errorMessage}`,
-          status: 'error' 
-        } : msg
-      ));
-
-      toast({
-        title: 'Query Submission Error',
-        description: errorMessage,
-        variant: 'destructive',
-      });
+      toast({ title: 'Lỗi', description: msg, variant: 'destructive' });
     } finally {
-      setIsProcessingQuery(false);
+      setIsProcessing(false);
     }
+  }, [query, mode, selectedCamera, isProcessing, geminiHistory, toast]);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
-  // Function to format timestamp
-  const formatTimestamp = (date: Date): string => {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const handleClear = () => {
+    setGeminiHistory([]);
+    setMessages([{
+      id: `clear-${Date.now()}`, role: 'system',
+      content: '🔄 Cuộc hội thoại đã được xóa.',
+      timestamp: new Date(), status: 'complete',
+    }]);
   };
+
+  const formatTime = (d: Date) =>
+    d.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+
+  const showSuggestions = messages.length <= 2 && !isProcessing;
 
   return (
     <Card className="h-[calc(100vh-10rem)] flex flex-col">
-      <CardHeader>
-        <div className="flex items-center justify-between">
+
+      {/* ── Header ── */}
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
           <div>
-            <CardTitle className="flex items-center">
-              <BrainCircuit className="h-5 w-5 mr-2" />
+            <CardTitle className="flex items-center gap-2">
+              <BrainCircuit className="h-5 w-5" />
               AI Assistant
             </CardTitle>
             <CardDescription>
-              Ask questions about what the cameras see
+              {mode === 'general'
+                ? 'Hỏi đáp về ong bắp cày, bảo vệ tổ ong'
+                : 'Phân tích trực tiếp từ camera'}
             </CardDescription>
           </div>
 
-          <div className="flex items-center gap-2">
-            <Select 
-              value={selectedCamera} 
-              onValueChange={handleCameraChange}
-            >
-              <SelectTrigger className="w-[180px]">
-                <SelectValue placeholder="Select Camera" />
-              </SelectTrigger>
-              <SelectContent>
-                {cameras.map((camera) => (
-                  <SelectItem key={camera.id} value={camera.id || ''}>
-                    {camera.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Mode toggle */}
+            <div className="flex rounded-lg border overflow-hidden text-sm">
+              <button
+                onClick={() => setMode('general')}
+                className={`px-3 py-1.5 flex items-center gap-1.5 transition-colors
+                  ${mode === 'general'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'hover:bg-muted text-muted-foreground'}`}
+              >
+                <MessageSquare className="h-3.5 w-3.5" />
+                Hỏi đáp
+              </button>
+              <button
+                onClick={() => setMode('camera')}
+                className={`px-3 py-1.5 flex items-center gap-1.5 border-l transition-colors
+                  ${mode === 'camera'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'hover:bg-muted text-muted-foreground'}`}
+              >
+                <Camera className="h-3.5 w-3.5" />
+                Camera
+              </button>
+            </div>
+
+            {/* Camera selector */}
+            {mode === 'camera' && (
+              <Select value={selectedCamera} onValueChange={setSelectedCamera}>
+                <SelectTrigger className="w-[160px]">
+                  <SelectValue placeholder="Chọn camera" />
+                </SelectTrigger>
+                <SelectContent>
+                  {cameras.map(c => (
+                    <SelectItem key={c.id} value={c.id ?? ''}>{c.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+
+            <Button variant="ghost" size="sm" onClick={handleClear} title="Xóa hội thoại">
+              <Trash2 className="h-4 w-4" />
+            </Button>
           </div>
         </div>
+
+        {/* Context badge */}
+        {mode === 'general' && geminiHistory.length > 0 && (
+          <Badge variant="secondary" className="text-xs w-fit mt-1">
+            {geminiHistory.length / 2} lượt — AI đang nhớ ngữ cảnh
+          </Badge>
+        )}
       </CardHeader>
-      
+
+      {/* ── Messages ── */}
       <CardContent className="flex-1 overflow-y-auto px-4 pb-0">
         <div className="space-y-4">
-          {messages.map((message) => (
+          {messages.map(msg => (
             <div
-              key={message.id}
-              className={`flex ${
-                message.role === 'user' ? 'justify-end' : 'justify-start'
-              }`}
+              key={msg.id}
+              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
-              <div
-                className={`max-w-[80%] rounded-lg px-4 py-2 ${
-                  message.role === 'user'
-                    ? 'bg-primary text-primary-foreground'
-                    : message.role === 'system'
-                    ? 'bg-muted text-muted-foreground'
-                    : 'bg-secondary text-secondary-foreground'
-                }`}
+              <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm
+                ${msg.role === 'user'
+                  ? 'bg-primary text-primary-foreground rounded-br-sm'
+                  : msg.role === 'system'
+                  ? 'bg-muted text-muted-foreground text-xs border rounded-bl-sm'
+                  : 'bg-secondary text-secondary-foreground rounded-bl-sm'}
+                ${msg.status === 'error' ? 'border-destructive border' : ''}`}
               >
-                <div className="flex justify-between items-center mb-1">
-                  <span className="text-xs font-medium">
-                    {message.role === 'user'
-                      ? 'You'
-                      : message.role === 'system'
-                      ? 'System'
-                      : 'AI Assistant'}
+                {/* Label + time */}
+                <div className="flex justify-between items-center mb-1 gap-3">
+                  <span className="text-xs font-semibold opacity-70">
+                    {msg.role === 'user' ? 'Bạn' : msg.role === 'system' ? 'Hệ thống' : 'AI Assistant'}
                   </span>
-                  <span className="text-xs opacity-70">
-                    {formatTimestamp(message.timestamp)}
-                  </span>
+                  <span className="text-xs opacity-50">{formatTime(msg.timestamp)}</span>
                 </div>
-                <div className="whitespace-pre-wrap"> {/* Added whitespace-pre-wrap here */}
-                  {message.content}
-                  {message.status === 'processing' && (
-                    <span className="ml-2 inline-flex">
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                    </span>
-                  )}
-                </div>
-                {message.image_base64 && (
-                  <div className="mt-2">
-                    <img 
-                      src={`data:image/jpeg;base64,${message.image_base64}`} 
-                      alt="Camera view" 
-                      className="rounded-md w-full h-auto max-h-[300px] object-contain mt-2 border border-border"
-                    />
+
+                {/* Content */}
+                {msg.status === 'processing' ? (
+                  <div className="flex items-center gap-2 text-muted-foreground">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    <span>Đang xử lý...</span>
                   </div>
+                ) : msg.role === 'assistant' && msg.mode === 'general' ? (
+                  renderMarkdown(msg.content)
+                ) : (
+                  <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
+                )}
+
+                {/* Camera image */}
+                {msg.image_base64 && (
+                  <img
+                    src={`data:image/jpeg;base64,${msg.image_base64}`}
+                    alt="Camera view"
+                    className="mt-2 rounded-lg w-full max-h-[280px] object-contain border"
+                  />
                 )}
               </div>
             </div>
@@ -287,35 +337,59 @@ export default function AiAssistant() {
         </div>
       </CardContent>
 
-      <CardFooter className="pt-4">
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSendQuery();
-          }}
-          className="grid w-full grid-cols-12 gap-2"
-        >
-          <div className="col-span-10 sm:col-span-11">
-            <Input
-              placeholder="Ask about what the camera sees or request a photo..."
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              disabled={isProcessingQuery || !selectedCamera}
-            />
+      {/* ── Suggested questions ── */}
+      {showSuggestions && (
+        <div className="px-4 py-2">
+          <p className="text-xs text-muted-foreground mb-2">Gợi ý:</p>
+          <div className="flex flex-wrap gap-2">
+            {(mode === 'camera' ? SUGGESTED_CAMERA : SUGGESTED_GENERAL).map(q => (
+              <button
+                key={q}
+                onClick={() => { setQuery(q); textareaRef.current?.focus(); }}
+                className="text-xs px-3 py-1.5 rounded-full border hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+              >
+                {q}
+              </button>
+            ))}
           </div>
+        </div>
+      )}
+
+      {/* ── Input ── */}
+      <CardFooter className="pt-3 pb-4 flex-col items-start gap-1">
+        <div className="flex w-full gap-2 items-end">
+          <Textarea
+            ref={textareaRef}
+            placeholder={
+              mode === 'camera'
+                ? 'Hỏi về những gì camera đang thấy... (Enter gửi)'
+                : 'Hỏi về ong bắp cày, bảo vệ tổ ong... (Enter gửi, Shift+Enter xuống dòng)'
+            }
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={isProcessing || (mode === 'camera' && !selectedCamera)}
+            rows={1}
+            className="min-h-[42px] max-h-[120px] resize-none flex-1"
+            onInput={e => {
+              const t = e.target as HTMLTextAreaElement;
+              t.style.height = 'auto';
+              t.style.height = `${Math.min(t.scrollHeight, 120)}px`;
+            }}
+          />
           <Button
-            type="submit"
-            className="col-span-2 sm:col-span-1"
-            disabled={isProcessingQuery || !selectedCamera || !query.trim()}
+            onClick={handleSend}
+            disabled={isProcessing || !query.trim() || (mode === 'camera' && !selectedCamera)}
+            size="icon" className="h-[42px] w-[42px] shrink-0"
           >
-            {isProcessingQuery ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <SendHorizonal className="h-4 w-4" />
-            )}
-            <span className="sr-only">Send</span>
+            {isProcessing
+              ? <Loader2 className="h-4 w-4 animate-spin" />
+              : <SendHorizontal className="h-4 w-4" />}
           </Button>
-        </form>
+        </div>
+        {mode === 'camera' && !selectedCamera && cameras.length === 0 && (
+          <p className="text-xs text-muted-foreground">Chưa có camera nào trong hệ thống</p>
+        )}
       </CardFooter>
     </Card>
   );

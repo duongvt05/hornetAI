@@ -569,6 +569,111 @@ def serve_upload(filename: str):
     return send_from_directory(os.path.abspath(UPLOAD_FOLDER), filename)
 
 
+# ─── GEMINI AI CHAT ───────────────────────────────────────────────────────────
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+HORNET_SYSTEM_PROMPT = """Bạn là trợ lý AI của hệ thống HornetAI — hệ thống giám sát và bảo vệ đàn ong mật khỏi ong bắp cày xâm lấn (đặc biệt là Vespa velutina).
+
+Chuyên môn của bạn:
+- Sinh học ong bắp cày và ong mật
+- Nhận dạng loài: Vespa velutina (nguy hiểm cao/critical), Vespa crabro (trung bình/warning), Vespula sp. (thấp/info)
+- Chiến lược bảo vệ tổ ong: thu hẹp cửa tổ, đặt bẫy, hệ thống âm thanh xua đuổi 18kHz
+- Phân tích dữ liệu phát hiện từ camera YOLOv8
+- Tư vấn nuôi ong, mùa vụ, dịch bệnh
+
+Trả lời bằng tiếng Việt, ngắn gọn, thực tế và hữu ích."""
+
+
+@app.route("/api/v1/ai/chat", methods=["POST"])
+@jwt_required()
+def ai_chat():
+    """
+    POST /api/v1/ai/chat
+    Body: {
+        "message": "câu hỏi",
+        "history": [{"role": "user"|"model", "parts": [{"text": "..."}]}]
+    }
+    """
+    if not GEMINI_API_KEY:
+        return jsonify({"success": False, "error": "GEMINI_API_KEY chưa được cấu hình trong .env"}), 503
+
+    data    = request.get_json()
+    message = (data.get("message") or "").strip()
+    history = data.get("history") or []
+
+    if not message:
+        return jsonify({"success": False, "error": "Vui lòng nhập câu hỏi"}), 400
+
+    # Giới hạn history 20 lượt để tránh vượt quota
+    if len(history) > 20:
+        history = history[-20:]
+
+    # Gemini format: contents = [...history, user message]
+    contents = [
+        *history,
+        {"role": "user", "parts": [{"text": message}]}
+    ]
+
+    payload = {
+        "system_instruction": {"parts": [{"text": HORNET_SYSTEM_PROMPT}]},
+        "contents": contents,
+        "generationConfig": {
+            "maxOutputTokens": 1024,
+            "temperature": 0.7,
+        }
+    }
+
+    try:
+        # Thử tối đa 2 lần nếu bị 429
+        resp = None
+        for attempt in range(2):
+            resp = req.post(
+                f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+                json=payload,
+                timeout=30
+            )
+            if resp.status_code == 429:
+                if attempt == 0:
+                    time.sleep(3)  # Đợi 3 giây rồi thử lại
+                    continue
+                return jsonify({"success": False,
+                                "error": "Gemini đang bận (quá nhiều yêu cầu), vui lòng thử lại sau vài giây"}), 429
+            resp.raise_for_status()
+            break
+
+        result = resp.json()
+        reply = result["candidates"][0]["content"]["parts"][0]["text"]
+        return jsonify({"success": True, "response": reply})
+
+    except req.exceptions.Timeout:
+        return jsonify({"success": False, "error": "Gemini timeout, thử lại sau"}), 504
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 502
+
+
+@app.route("/api/v1/ai/context", methods=["GET"])
+@jwt_required()
+def get_detection_context():
+    """Trả về tóm tắt phát hiện gần đây để AI có thêm ngữ cảnh"""
+    limit  = request.args.get("limit", 10, type=int)
+    events = (DetectionEvent.query
+              .order_by(DetectionEvent.timestamp.desc())
+              .limit(limit).all())
+
+    if not events:
+        return jsonify({"context": "Chưa có phát hiện nào.", "count": 0})
+
+    lines = [
+        f"- [{e.timestamp.strftime('%d/%m %H:%M')}] {e.camera_name}: "
+        f"{e.count} {e.dominant_species} (mức độ: {e.overall_severity})"
+        for e in events
+    ]
+    return jsonify({
+        "context": "Phát hiện gần đây:\n" + "\n".join(lines),
+        "count": len(events)
+    })
+
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     init_db()
